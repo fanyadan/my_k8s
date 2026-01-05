@@ -1,0 +1,91 @@
+apiVersion: kubeflow.org/v2beta1
+kind: MPIJob
+metadata:
+  name: news-agent-langchain
+  namespace: news-agent
+spec:
+  slotsPerWorker: 1
+  runPolicy:
+    cleanPodPolicy: Running
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        spec:
+          containers:
+            - name: launcher
+              image: news-agent-mpi:local
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: NEWS_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: news-agent-secrets
+                      key: NEWS_API_KEY
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: news-agent-secrets
+                      key: HF_TOKEN
+                - name: HF_PROVIDER
+                  value: novita
+                - name: HF_MODEL
+                  value: zai-org/GLM-4.6
+                - name: NEWS_AGENT_DISTRIBUTED_MODE
+                  value: shard
+                - name: NEWS_AGENT_DISTRIBUTED_BACKEND
+                  value: mpi
+                - name: NEWS_AGENT_MPI_CHECK
+                  value: "1"
+                - name: OMPI_ALLOW_RUN_AS_ROOT
+                  value: "1"
+                - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+                  value: "1"
+              command: ["bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  echo "Launcher: $(hostname)"
+                  echo "Hostfile (/etc/mpi/hostfile):"
+                  cat /etc/mpi/hostfile || true
+
+                  /usr/bin/mpirun.openmpi --allow-run-as-root \
+                    --hostfile /etc/mpi/hostfile \
+                    -np 5 \
+                    python /workspace/news_agent_langchain.py
+    Worker:
+      replicas: 5
+      restartPolicy: OnFailure
+      template:
+        spec:
+          containers:
+            - name: worker
+              image: news-agent-mpi:local
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: NEWS_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: news-agent-secrets
+                      key: NEWS_API_KEY
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: news-agent-secrets
+                      key: HF_TOKEN
+                - name: HF_PROVIDER
+                  value: novita
+                - name: HF_MODEL
+                  value: zai-org/GLM-4.6
+                - name: NEWS_AGENT_DISTRIBUTED_MODE
+                  value: shard
+                - name: NEWS_AGENT_DISTRIBUTED_BACKEND
+                  value: mpi
+                - name: NEWS_AGENT_MPI_CHECK
+                  value: "1"
+                - name: OMPI_ALLOW_RUN_AS_ROOT
+                  value: "1"
+                - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+                  value: "1"
+              command: ["/usr/sbin/sshd", "-De", "-f", "/etc/ssh/sshd_config"]

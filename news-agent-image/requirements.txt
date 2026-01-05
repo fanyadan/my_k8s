@@ -1,0 +1,9 @@
+requests
+huggingface_hub
+mpi4py
+numpy
+torch
+pydantic
+langchain
+langchain-core
+langgraph
