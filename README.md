@@ -1,6 +1,8 @@
-# my_k8s: Distributed “news fetcher agent” on a local kind Kubernetes cluster
+# A local kind K8S cluster for running distributed AI agent
 
 This project runs a small distributed “news fetcher agent” on a local Kubernetes cluster created with **kind**.
+
+This project is ONLY a practice demo.
 
 Two MPIJobs are provided:
 
