@@ -2,7 +2,8 @@
 
 This project runs a small distributed “news fetcher agent” on a local Kubernetes cluster created with **kind**.
 
-This project is ONLY a practice demo.
+This project is ONLY a practice demo, it's built upon MacOS, so some of the tools in prerequisites might be
+different for Windows or Linux. 
 
 Two MPIJobs are provided:
 
