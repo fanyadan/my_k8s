@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage:
-#   scripts/bootstrap_kind_mpi_cluster.zsh [--recreate] [--no-operator] [--no-rbac]
+#   scripts/bootstrap_kind_mpi_cluster.zsh [--recreate] [--no-operator] [--no-rbac] [--cluster-rbac] [--namespaced-rbac]
 #
 # Env overrides:
 #   CLUSTER_NAME=mpi
@@ -11,7 +11,9 @@ set -euo pipefail
 #   HELM_NAMESPACE=mpi-operator
 #   HELM_CHART=cowboysysop/mpi-operator
 #   HELM_CHART_VERSION=1.2.2
-#   PYTHON_BIN=/opt/homebrew/Caskroom/miniforge/base/bin/python
+#   TARGET_NAMESPACE=news-agent
+#   RBAC_MODE=namespaced   # namespaced (default), cluster (chart RBAC, no patch), or none
+#   SERVICE_ACCOUNT=mpi-operator
 
 SCRIPT_DIR="${0:A:h}"
 ROOT_DIR="${SCRIPT_DIR:h}"
@@ -25,8 +27,20 @@ HELM_CHART="${HELM_CHART:-cowboysysop/mpi-operator}"
 HELM_CHART_VERSION="${HELM_CHART_VERSION:-1.2.2}"
 
 INSTALL_OPERATOR=1
-PATCH_RBAC=1
 RECREATE=0
+TARGET_NAMESPACE="${TARGET_NAMESPACE:-news-agent}"
+SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-mpi-operator}"
+
+# RBAC_MODE: namespaced (default, multi-tenant friendly), cluster (use chart RBAC as-is), or none.
+RBAC_MODE="${RBAC_MODE:-namespaced}"
+# Backward compatibility: PATCH_RBAC previously triggered a ClusterRole patch; now it just toggles RBAC_MODE.
+if [[ -n "${PATCH_RBAC:-}" ]]; then
+  if [[ "$PATCH_RBAC" -eq 1 ]]; then
+    RBAC_MODE="cluster"
+  else
+    RBAC_MODE="none"
+  fi
+fi
 
 while (( $# > 0 )); do
   case "$1" in
@@ -37,15 +51,21 @@ while (( $# > 0 )); do
       INSTALL_OPERATOR=0
       ;;
     --no-rbac)
-      PATCH_RBAC=0
+      RBAC_MODE="none"
+      ;;
+    --cluster-rbac)
+      RBAC_MODE="cluster"
+      ;;
+    --namespaced-rbac)
+      RBAC_MODE="namespaced"
       ;;
     -h|--help)
-      echo "Usage: $0 [--recreate] [--no-operator] [--no-rbac]" >&2
+      echo "Usage: $0 [--recreate] [--no-operator] [--no-rbac] [--cluster-rbac] [--namespaced-rbac]" >&2
       exit 0
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--recreate] [--no-operator] [--no-rbac]" >&2
+      echo "Usage: $0 [--recreate] [--no-operator] [--no-rbac] [--cluster-rbac] [--namespaced-rbac]" >&2
       exit 2
       ;;
   esac
@@ -90,6 +110,13 @@ fi
 
 kubectl config use-context "kind-$CLUSTER_NAME" >/dev/null
 
+# Ensure target namespace exists before RBAC bindings or job creation.
+if [[ -f "$ROOT_DIR/k8s/namespace.yaml" ]]; then
+  kubectl apply -f "$ROOT_DIR/k8s/namespace.yaml" >/dev/null
+else
+  kubectl get namespace "$TARGET_NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$TARGET_NAMESPACE" >/dev/null
+fi
+
 # Wait for nodes.
 kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null
 kubectl get nodes -o wide
@@ -108,59 +135,53 @@ if (( INSTALL_OPERATOR == 1 )); then
   kubectl -n "$HELM_NAMESPACE" get pods -o wide
 fi
 
-# Patch RBAC so mpi-operator can update Role/RoleBinding objects it owns.
-# (Some chart versions only grant create/list/watch on roles/rolebindings, which breaks reconciliation.)
-if (( PATCH_RBAC == 1 )); then
-  PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/Caskroom/miniforge/base/bin/python}"
-  if [[ ! -x "$PYTHON_BIN" ]]; then
-    PYTHON_BIN="python3"
-  fi
+case "$RBAC_MODE" in
+  cluster)
+    echo "Using chart-provided cluster RBAC (no patch applied)."
+    kubectl auth can-i update roles \
+      --as=system:serviceaccount:"$HELM_NAMESPACE":"$SERVICE_ACCOUNT" \
+      -n "$TARGET_NAMESPACE"
+    ;;
+  namespaced)
+    # Namespace-scoped RBAC for multi-tenant clusters: allow the operator serviceaccount to manage
+    # Roles/RoleBindings it owns only in the target namespace.
+    cat <<EOF | kubectl -n "$TARGET_NAMESPACE" apply -f - >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mpi-operator-rbac
+rules:
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+EOF
 
-  PATCH_JSON="$($PYTHON_BIN - <<'PY'
-import json
-import subprocess
-import sys
+    cat <<EOF | kubectl -n "$TARGET_NAMESPACE" apply -f - >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mpi-operator-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mpi-operator-rbac
+subjects:
+- kind: ServiceAccount
+  name: "$SERVICE_ACCOUNT"
+  namespace: "$HELM_NAMESPACE"
+EOF
 
-doc = json.loads(subprocess.check_output(["kubectl", "get", "clusterrole", "mpi-operator", "-o", "json"]))
-rules = doc.get("rules") or []
-
-idx = None
-for i, r in enumerate(rules):
-    api_groups = set(r.get("apiGroups") or [])
-    resources = set(r.get("resources") or [])
-    if "rbac.authorization.k8s.io" in api_groups and {"roles", "rolebindings"}.issubset(resources):
-        idx = i
-        break
-
-if idx is None:
-    print("Could not find the rbac.authorization.k8s.io roles/rolebindings rule in ClusterRole/mpi-operator", file=sys.stderr)
-    sys.exit(1)
-
-patch = [
-    {
-        "op": "replace",
-        "path": f"/rules/{idx}/verbs",
-        "value": ["create", "get", "list", "watch", "update", "patch", "delete"],
-    }
-]
-print(json.dumps(patch))
-PY
-  )"
-
-  kubectl patch clusterrole mpi-operator --type='json' -p "$PATCH_JSON" >/dev/null
-
-  # Restart operator to ensure it re-reconciles cleanly.
-  kubectl -n "$HELM_NAMESPACE" rollout restart deploy/mpi-operator >/dev/null
-  kubectl -n "$HELM_NAMESPACE" rollout status deploy/mpi-operator --timeout=180s
-
-  # Create target namespace (for can-i check and later jobs).
-  if [[ -f "$ROOT_DIR/k8s/namespace.yaml" ]]; then
-    kubectl apply -f "$ROOT_DIR/k8s/namespace.yaml" >/dev/null
-  fi
-
-  kubectl auth can-i update roles \
-    --as=system:serviceaccount:"$HELM_NAMESPACE":mpi-operator \
-    -n news-agent
-fi
+    kubectl auth can-i update roles \
+      --as=system:serviceaccount:"$HELM_NAMESPACE":"$SERVICE_ACCOUNT" \
+      -n "$TARGET_NAMESPACE"
+    ;;
+  none)
+    echo "Skipping RBAC adjustments (RBAC_MODE=none)"
+    ;;
+  *)
+    echo "Unknown RBAC_MODE: $RBAC_MODE" >&2
+    exit 2
+    ;;
+esac
 
 echo "Bootstrap complete: kind-$CLUSTER_NAME"

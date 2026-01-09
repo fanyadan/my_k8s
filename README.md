@@ -24,7 +24,7 @@ Both jobs:
 - `k8s/mpijob-langchain.yaml`: MPIJob manifest for the LangChain agent
 - `k8s/secret.yaml` / `k8s/secret.template.yaml`: placeholder secret template (do **not** apply with `REPLACE_ME`)
 - `news-agent-image/`: Docker build context for the runtime image (`news-agent-mpi:local`)
-- `scripts/bootstrap_kind_mpi_cluster.zsh`: one-command cluster bootstrap (kind + mpi-operator + RBAC patch)
+- `scripts/bootstrap_kind_mpi_cluster.zsh`: one-command cluster bootstrap (kind + mpi-operator + namespace-scoped RBAC; cluster RBAC patch no longer needed)
 - `scripts/run_news_agent_mpijobs.zsh`: sync code + build/load image + sync secrets + (re)run MPIJobs
 
 ## Prerequisites
@@ -96,7 +96,7 @@ This will:
 
 - create (or reuse) a kind cluster (default name `mpi`)
 - install `mpi-operator` via Helm
-- patch RBAC so `mpi-operator` can update Roles/RoleBindings (required for reliable reconciliation)
+- apply namespace-scoped RBAC for the operator (multi-tenant friendly). The chart already includes the needed verbs, so the old cluster-scope RBAC patch flag is no longer required; use `--cluster-rbac`/`--no-rbac` if you prefer the chart defaults instead of the namespaced Role/RoleBinding.
 
 ```bash
 ./scripts/bootstrap_kind_mpi_cluster.zsh
@@ -234,11 +234,7 @@ If pods aren’t created or MPIJobs get stuck, check operator logs:
 kubectl -n mpi-operator logs deploy/mpi-operator --tail=200
 ```
 
-If you see errors like “forbidden … cannot update resource roles …”, re-run:
-
-```bash
-./scripts/bootstrap_kind_mpi_cluster.zsh
-```
+If you see errors like “forbidden … cannot update resource roles …”, make sure you’re on a recent chart (cluster RBAC patch is no longer required). Reinstall the operator or run with `--no-rbac`/`--cluster-rbac` to use the chart defaults instead of the namespaced Role/RoleBinding.
 
 ### Events
 
